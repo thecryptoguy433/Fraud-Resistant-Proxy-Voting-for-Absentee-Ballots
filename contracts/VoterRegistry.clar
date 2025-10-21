@@ -1,0 +1,130 @@
+(define-constant ERR-NOT-AUTHORIZED (err u200))
+(define-constant ERR-VOTER-ALREADY-REGISTERED (err u201))
+(define-constant ERR-VOTER-NOT-FOUND (err u202))
+(define-constant ERR-INVALID-PROOF (err u203))
+(define-constant ERR-INVALID-STATUS (err u204))
+(define-constant ERR-INVALID-TIMESTAMP (err u205))
+(define-constant ERR-MAX-VOTERS-EXCEEDED (err u206))
+(define-constant ERR-INVALID-AMOUNT (err u207))
+(define-constant ERR-TRANSFER-FAILED (err u208))
+(define-constant ERR-INVALID-VOTER-ID (err u209))
+(define-constant ERR-REGISTRATION-CLOSED (err u210))
+
+(define-data-var admin principal tx-sender)
+(define-data-var max-voters uint u10000)
+(define-data-var registration-fee uint u50)
+(define-data-var registration-open bool true)
+(define-data-var next-voter-id uint u1)
+
+(define-map Voters { voter-id: uint } { principal: principal, proof-hash: (buff 32), registered-at: uint, active: bool })
+(define-map VoterByPrincipal principal uint)
+(define-map AuditLogs uint { action: (string-ascii 50), actor: principal, timestamp: uint })
+
+(define-read-only (get-voter (voter-id uint))
+  (map-get? Voters { voter-id: voter-id })
+)
+
+(define-read-only (get-voter-id-by-principal (voter principal))
+  (map-get? VoterByPrincipal voter)
+)
+
+(define-read-only (get-audit-log (log-id uint))
+  (map-get? AuditLogs log-id)
+)
+
+(define-read-only (get-registration-status)
+  (ok (var-get registration-open))
+)
+
+(define-read-only (get-voter-count)
+  (ok (var-get next-voter-id))
+)
+
+(define-private (is-admin (caller principal))
+  (is-eq caller (var-get admin))
+)
+
+(define-private (log-audit (action (string-ascii 50)) (actor principal))
+  (map-set AuditLogs (+ (map-size AuditLogs) u1) { action: action, actor: actor, timestamp: block-height })
+  true
+)
+
+(define-private (transfer-fee (amount uint) (from principal))
+  (try! (stx-transfer? amount from (var-get admin)))
+)
+
+(define-public (set-admin (new-admin principal))
+  (begin
+    (asserts! (is-admin tx-sender) (err ERR-NOT-AUTHORIZED))
+    (var-set admin new-admin)
+    (log-audit "set-admin" tx-sender)
+    (ok true)
+  )
+)
+
+(define-public (set-registration-fee (new-fee uint))
+  (begin
+    (asserts! (is-admin tx-sender) (err ERR-NOT-AUTHORIZED))
+    (asserts! (> new-fee u0) (err ERR-INVALID-AMOUNT))
+    (var-set registration-fee new-fee)
+    (log-audit "set-registration-fee" tx-sender)
+    (ok true)
+  )
+)
+
+(define-public (toggle-registration (open bool))
+  (begin
+    (asserts! (is-admin tx-sender) (err ERR-NOT-AUTHORIZED))
+    (var-set registration-open open)
+    (log-audit (if open "open-registration" "close-registration") tx-sender)
+    (ok true)
+  )
+)
+
+(define-public (set-max-voters (new-max uint))
+  (begin
+    (asserts! (is-admin tx-sender) (err ERR-NOT-AUTHORIZED))
+    (asserts! (> new-max u0) (err ERR-INVALID-AMOUNT))
+    (var-set max-voters new-max)
+    (log-audit "set-max-voters" tx-sender)
+    (ok true)
+  )
+)
+
+(define-public (register-voter (voter principal) (proof-hash (buff 32)))
+  (begin
+    (asserts! (var-get registration-open) (err ERR-REGISTRATION-CLOSED))
+    (asserts! (<= (var-get next-voter-id) (var-get max-voters)) (err ERR-MAX-VOTERS-EXCEEDED))
+    (asserts! (is-none (get-voter-id-by-principal voter)) (err ERR-VOTER-ALREADY-REGISTERED))
+    (try! (transfer-fee (var-get registration-fee) tx-sender))
+    (let ((voter-id (var-get next-voter-id)))
+      (map-set Voters { voter-id: voter-id } { principal: voter, proof-hash: proof-hash, registered-at: block-height, active: true })
+      (map-set VoterByPrincipal voter voter-id)
+      (var-set next-voter-id (+ voter-id u1))
+      (log-audit "register-voter" tx-sender)
+      (ok voter-id)
+    )
+  )
+)
+
+(define-public (update-voter-status (voter-id uint) (active bool))
+  (begin
+    (asserts! (is-admin tx-sender) (err ERR-NOT-AUTHORIZED))
+    (let ((voter (unwrap! (get-voter voter-id) (err ERR-VOTER-NOT-FOUND))))
+      (map-set Voters { voter-id: voter-id } (merge voter { active: active }))
+      (log-audit (if active "activate-voter" "deactivate-voter") tx-sender)
+      (ok true)
+    )
+  )
+)
+
+(define-public (verify-voter (voter-id uint) (proof-hash (buff 32)))
+  (begin
+    (let ((voter (unwrap! (get-voter voter-id) (err ERR-VOTER-NOT-FOUND))))
+      (asserts! (is-eq (get proof-hash voter) proof-hash) (err ERR-INVALID-PROOF))
+      (asserts! (get active voter) (err ERR-INVALID-STATUS))
+      (log-audit "verify-voter" tx-sender)
+      (ok true)
+    )
+  )
+)
